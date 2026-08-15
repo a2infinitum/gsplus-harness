@@ -103,6 +103,8 @@ set(GSPLUS_CORE_SOURCES
     video.c
     voc.c
     compile_time.c
+    png_write.c
+    harness.c
 )
 
 # Create the static library target from those sources.
@@ -262,7 +264,6 @@ target_compile_options(gsplus_core_sdl PRIVATE -Wall)
 add_executable(gsplus-sdl
     sdl_driver.c
     sdl_snd_driver.c
-    png_write.c
 )
 target_link_libraries(gsplus-sdl PRIVATE gsplus_core_sdl SDL3::SDL3)
 

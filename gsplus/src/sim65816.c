@@ -13,6 +13,7 @@
 #define INCLUDE_RCSID_C
 #include "defc.h"
 #undef INCLUDE_RCSID_C
+#include "harness.h"
 
 /* GSplus version for the status line, set by the build from the git tag (see
  * CMakeLists.txt). Fallback for non-CMake (Makefile) builds. */
@@ -520,6 +521,7 @@ print_usage(const char *argv0)
 	printf("  -logpc           Force PC logging on at startup\n");
 	printf("  -cfg <file>      Use <file> as the config file "
 						"(created if absent)\n");
+	harness_usage();
 	printf("\n");
 	printf("Display options (config variables, override with "
 						"-<name> <value>):\n");
@@ -683,6 +685,10 @@ parse_argv(int argc, char **argv, int slashes_to_find)
 				config_set_config_kegs_name(argv[i+1]);
 			}
 			i++;
+		} else if((tmp1 = harness_parse_argv(argc, argv, &i)) != 0) {
+			if(tmp1 < 0) {
+				return 1;
+			}
 		} else if(argv[i][0] == '-') {
 			arg2_str = 0;
 			if((i + 1) < argc) {
@@ -1119,7 +1125,9 @@ run_16ms()
 	g_dtime_in_run_16ms += (dtime_end - dtime_start);
 
 	// If we are ahead, then do the sleep now
-	micro_sleep(g_dtime_sleep);
+	if(!g_harness_turbo) {
+		micro_sleep(g_dtime_sleep);
+	}
 	dtime_end2 = get_dtime();
 	//printf("Did sleep for %f, dtime passed:%f\n", g_dtime_sleep,
 	//					dtime_end2 - dtime_end);
@@ -1139,6 +1147,7 @@ run_16ms()
 			dtime_end, dtime_end - dtime_start, dtime_outside);
 	}
 #endif
+	ret |= harness_tick();
 	return ret | g_a2_fatal_err;
 }
 

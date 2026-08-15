@@ -26,6 +26,7 @@
 
 #include "defc.h"
 #include "protos_sdl.h"
+#include "harness.h"
 #ifndef __APPLE__
 # include "gsplus_icon.h"	/* embedded RGBA window icon (see below) */
 #endif
@@ -1519,5 +1520,5 @@ main(int argc, char **argv)
 
 	sdl_snd_shutdown();
 	SDL_Quit();
-	return 0;
+	return harness_exit_code();
 }

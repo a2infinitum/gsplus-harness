@@ -13,6 +13,11 @@
 case 0x00:			/*  brk */
 	GET_1BYTE_ARG;
 	g_num_brk++;
+	if(g_harness_trap_brk) {
+		/* Test harness -hbrk: a BRK during an unattended run is a
+		 * crash; halt2 so g_ignore_halts cannot swallow it. */
+		halt2_printf("Harness: BRK at %06x\n", kpc);
+	}
 	INC_KPC_2;
 	psr = (psr & (~0x82)) | (neg7 & 0x80) | ((!zero) << 1);
 	if(psr & 0x100) {
