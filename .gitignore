@@ -3,6 +3,7 @@
 # Build / runtime artifacts
 gsplus/GSplus.app/
 gsplus/src/build/
+gsplus/build/
 config.kegs
 gsplus_screenshot_*.png
 
