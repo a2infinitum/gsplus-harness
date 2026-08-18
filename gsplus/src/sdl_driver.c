@@ -92,13 +92,18 @@ extern int g_vblur;			/* vertical linear blur, 0-100 */
 extern int g_hide_mouse;		/* hide host cursor over window / in fullscreen */
 extern int g_mainwin_xpos, g_mainwin_ypos;	/* window position (KEGS config vars) */
 extern char *g_cfg_ssdir;		/* screenshot output dir ("" = current dir) */
+extern int g_sshot_every;		/* auto-screenshot interval, seconds (0=off) */
+extern char *g_cfg_ssfile;		/* auto-screenshot fixed path (overwritten) */
 extern int g_halt_sim;			/* nonzero while the debugger has the CPU halted */
+extern char *g_cfg_script;		/* harness command script run at startup */
+extern const int g_a2_key_to_ascii[][4];	/* adb.c: a2code, ascii, shifted, ctrl */
 
 static int g_is_fullscreen = 0;		/* current fullscreen state (F11 toggles) */
 static int g_mouse_over_window = 0;	/* cursor is inside our window (ENTER/LEAVE) */
 static int g_cursor_hidden = 0;		/* current SDL cursor state we last set */
 static int g_scanline_saved = 50;	/* intensity to restore when toggled back on */
 static int g_screenshot_requested = 0;	/* set by Shift+F12, serviced at frame end */
+static time_t g_sshot_last = 0;		/* last auto-screenshot time (ssevery) */
 
 /* CRT effect tuning. The curvature amount is a config var (g_crt_curve, 0-100);
  * these bake the rest of the look so the user gets one "CRT Effect" toggle. */
@@ -746,10 +751,19 @@ sdl_button_mask(int sdl_button)
 /* "Native Joystick 1" in the config menu (F4) to route paddles here.       */
 
 extern int g_joystick_native_type1;	/* paddles.c: -1 = no joystick present */
+extern int g_joystick_type;		/* paddles.c: 0=keypad 1=mouse 2,3=native */
 extern int g_paddle_buttons;		/* paddles.c: bits 0,1 = buttons 0,1 */
 extern int g_paddle_val[4];		/* paddles.c: [0]=X [1]=Y, -32768..32767 */
 
 static SDL_Gamepad *g_sdl_gamepad = NULL;	/* the open controller, or NULL */
+
+/* Harness "virtual joystick": when on, the `joy`/`joybtn` control commands own
+ * the paddle inputs and any real gamepad is ignored, so a scripted flight test
+ * produces the same stick values on every machine (see the control channel
+ * below). Values are the core's raw -32768..32767 axis range, 0 = centered. */
+static int g_harn_joy_on = 0;
+static int g_harn_joy_x = 0, g_harn_joy_y = 0;
+static int g_harn_joy_btn = 0;			/* bits 0,1 = buttons 0,1 */
 
 /* Open the first connected controller SDL has a gamepad mapping for. */
 static void
@@ -812,6 +826,14 @@ joystick_update(dword64 dfcyc)
 	}
 	g_paddle_buttons = 0xc;
 
+	/* Harness stick wins over any real controller. */
+	if(g_harn_joy_on) {
+		g_paddle_val[0] = g_harn_joy_x;
+		g_paddle_val[1] = g_harn_joy_y;
+		g_paddle_buttons = 0xc | (g_harn_joy_btn & 3);
+		paddle_update_trigger_dcycs(dfcyc);
+		return;
+	}
 	if(!g_sdl_gamepad) {
 		return;
 	}
@@ -1033,10 +1055,11 @@ sdl_build_screenshot_path(char *buf, size_t buflen)
 }
 
 /* Grab the currently-rendered frame (post-scaling, including any scanline
- * overlay and letterbox borders) and write it to a PNG. Called after the frame
- * is drawn but before SDL_RenderPresent, so the back buffer is still valid. */
+ * overlay and letterbox borders) and write it to a PNG at path (NULL = build
+ * a timestamped name via ssdir). Called after the frame is drawn but before
+ * SDL_RenderPresent, so the back buffer is still valid. */
 static void
-sdl_save_screenshot(Window_info *win)
+sdl_save_screenshot(Window_info *win, const char *fixed_path)
 {
 	SDL_Surface *shot, *conv;
 	unsigned char *packed;
@@ -1081,12 +1104,19 @@ sdl_save_screenshot(Window_info *win)
 	}
 	SDL_DestroySurface(conv);
 
-	sdl_build_screenshot_path(path, sizeof(path));
+	if(fixed_path) {
+		/* Overwrite via temp+rename so readers never see a partial file. */
+		snprintf(path, sizeof(path), "%s.tmp", fixed_path);
+	} else {
+		sdl_build_screenshot_path(path, sizeof(path));
+	}
 	rc = write_png_rgba(path, packed, w, h);
 	free(packed);
 
 	if(rc) {
 		printf("Screenshot failed: could not write %s\n", path);
+	} else if(fixed_path) {
+		rename(path, fixed_path);
 	} else {
 		printf("Screenshot saved: %s (%dx%d)\n", path, w, h);
 	}
@@ -1350,8 +1380,16 @@ sdl_update_display(Window_info *win)
 	/* Service a pending Shift+F12 capture now, while the just-drawn frame is
 	 * still in the back buffer (RenderPresent may invalidate it). */
 	if(g_screenshot_requested) {
-		sdl_save_screenshot(win);
+		sdl_save_screenshot(win, NULL);
 		g_screenshot_requested = 0;
+	}
+	/* Periodic auto-screenshot to a fixed file (ssevery/ssfile config). */
+	if(g_sshot_every > 0 && g_cfg_ssfile && g_cfg_ssfile[0]) {
+		time_t now = time(NULL);
+		if(now - g_sshot_last >= g_sshot_every) {
+			sdl_save_screenshot(win, g_cfg_ssfile);
+			g_sshot_last = now;
+		}
 	}
 
 	SDL_RenderPresent(win->renderer);
@@ -1435,6 +1473,581 @@ sdl_dbg_prompt(void)
 	g_dbg_prompt_shown = 1;
 }
 
+/* --------------------------------------------------------------------------
+ * Harness control channel.
+ *
+ * Automated testing needs four things the SDL front end had no path for: press
+ * keys, move the joystick, read memory while the game is running, and capture
+ * the screen on demand. All four are one-line commands sharing the stdin queue
+ * above (so `echo cmd > fifo` drives a running emulator from a shell script),
+ * and the same commands can come from a file named by the `script` config var.
+ * A line the harness doesn't recognize still falls through to the 65816
+ * monitor, so `0/2000.20ff` and friends keep working.
+ *
+ * Keys are injected as real ADB key-down/key-up events rather than through the
+ * paste buffer: the paste path only fills the $C000 latch, so a game that gates
+ * on $C010 bit 7 (any-key-down) -- as Elite's flight loop does -- never sees a
+ * pasted key. A queued key is held for a number of frames, then released, with
+ * a one-frame gap so consecutive taps of the same key read as separate presses.
+ * ------------------------------------------------------------------------- */
+
+#define HARN_QLEN	512		/* pending key taps */
+#define HARN_HOLD_MAX	8		/* simultaneously held sticky keys */
+#define HARN_DEF_FRAMES	3		/* default frames a tapped key is down */
+
+struct harn_key {
+	int	a2code;
+	int	shift;			/* press shift alongside */
+	int	frames;			/* frames to hold, then release */
+};
+
+static struct harn_key g_harn_q[HARN_QLEN];
+static int g_harn_q_head = 0, g_harn_q_tail = 0;
+static struct harn_key g_harn_down;	/* key from the queue currently down */
+static int g_harn_down_left = 0;	/* frames left before releasing it */
+static int g_harn_gap = 0;		/* idle frames after each release */
+static int g_harn_hold[HARN_HOLD_MAX];	/* sticky keys (a2codes), -1 = free */
+static int g_harn_wait = 0;		/* script: frames left on a `wait` */
+static char **g_harn_lines = NULL;	/* script lines, NULL-terminated */
+static int g_harn_nlines = 0, g_harn_pc = 0;
+
+static const struct { const char *name; int a2code; } g_harn_keynames[] = {
+	{ "left", 0x3b }, { "right", 0x3c }, { "down", 0x3d }, { "up", 0x3e },
+	{ "ret", 0x24 }, { "return", 0x24 }, { "enter", 0x24 },
+	{ "esc", 0x35 }, { "escape", 0x35 },
+	{ "space", 0x31 }, { "sp", 0x31 }, { "tab", 0x30 },
+	{ "del", 0x33 }, { "delete", 0x33 }, { "clear", 0x75 },
+	{ "shift", 0x38 }, { "ctrl", 0x36 }, { "option", 0x3a },
+	{ "apple", 0x37 }, { "caps", 0x39 },
+	{ 0, -1 }
+};
+
+/* Map one key spec to an ADB keycode. A spec is either a name from the table
+ * above, "$hh" for a raw ADB code, or a single character looked up in adb.c's
+ * ascii table (both columns, so "?" comes back as shift+/). Returns -1 if the
+ * spec names no key; *shift_ptr is set to 1 when the key needs shift held. */
+static int
+harn_spec_to_a2code(const char *spec, int *shift_ptr)
+{
+	int	i, c;
+
+	*shift_ptr = 0;
+	if(!spec || !spec[0]) {
+		return -1;
+	}
+	if(spec[1] != 0) {			/* multi-char: a name or $hh */
+		if(spec[0] == '$') {
+			return (int)strtol(spec + 1, 0, 16) & 0x7f;
+		}
+		for(i = 0; g_harn_keynames[i].name; i++) {
+			if(!SDL_strcasecmp(spec, g_harn_keynames[i].name)) {
+				return g_harn_keynames[i].a2code;
+			}
+		}
+		return -1;
+	}
+	c = spec[0] & 0xff;
+	if((c >= 'A') && (c <= 'Z')) {
+		c += 'a' - 'A';		/* type unshifted; the IIgs sees
+					 * the same key either way */
+	}
+	for(i = 0; i < 128; i++) {
+		if(g_a2_key_to_ascii[i][1] == c) {
+			return g_a2_key_to_ascii[i][0];
+		}
+	}
+	for(i = 0; i < 128; i++) {
+		if(g_a2_key_to_ascii[i][2] == c) {
+			*shift_ptr = 1;
+			return g_a2_key_to_ascii[i][0];
+		}
+	}
+	return -1;
+}
+
+static void
+harn_key_event(int a2code, int is_up)
+{
+	adb_physical_key_update(g_mainwin_info.kimage_ptr, a2code, 0, is_up);
+}
+
+/* Queue one key tap. Returns 0 if the queue is full. */
+static int
+harn_queue_key(int a2code, int shift, int frames)
+{
+	int	next = (g_harn_q_tail + 1) % HARN_QLEN;
+
+	if(next == g_harn_q_head) {
+		return 0;
+	}
+	g_harn_q[g_harn_q_tail].a2code = a2code;
+	g_harn_q[g_harn_q_tail].shift = shift;
+	g_harn_q[g_harn_q_tail].frames = (frames > 0) ? frames : HARN_DEF_FRAMES;
+	g_harn_q_tail = next;
+	return 1;
+}
+
+/* Advance the key queue by one frame: release a key whose time is up, then
+ * start the next one. Called every frame, halted or not. */
+static void
+harn_input_tick(void)
+{
+	if(g_harn_down_left > 0) {
+		g_harn_down_left--;
+		if(g_harn_down_left == 0) {
+			harn_key_event(g_harn_down.a2code, 1);
+			if(g_harn_down.shift) {
+				harn_key_event(0x38, 1);
+			}
+			g_harn_gap = 1;		/* let the game see the release */
+		}
+		return;
+	}
+	if(g_harn_gap > 0) {
+		g_harn_gap--;
+		return;
+	}
+	if(g_harn_q_head == g_harn_q_tail) {
+		return;				/* queue empty */
+	}
+	g_harn_down = g_harn_q[g_harn_q_head];
+	g_harn_q_head = (g_harn_q_head + 1) % HARN_QLEN;
+	if(g_harn_down.shift) {
+		harn_key_event(0x38, 0);
+	}
+	harn_key_event(g_harn_down.a2code, 0);
+	g_harn_down_left = g_harn_down.frames;
+}
+
+/* True while scripted input is still playing out, so `wait` and the script
+ * cursor don't run ahead of the keys they were meant to follow. */
+static int
+harn_input_busy(void)
+{
+	return (g_harn_down_left > 0) || (g_harn_gap > 0) ||
+					(g_harn_q_head != g_harn_q_tail);
+}
+
+static void
+harn_hold_init(void)
+{
+	int	i;
+
+	for(i = 0; i < HARN_HOLD_MAX; i++) {
+		g_harn_hold[i] = -1;
+	}
+}
+
+/* Press and keep holding a key (flight controls need the any-key-down bit set
+ * across many frames). Idempotent: holding an already-held key does nothing. */
+static void
+harn_hold_key(int a2code)
+{
+	int	i, free_slot = -1;
+
+	for(i = 0; i < HARN_HOLD_MAX; i++) {
+		if(g_harn_hold[i] == a2code) {
+			return;
+		}
+		if((g_harn_hold[i] < 0) && (free_slot < 0)) {
+			free_slot = i;
+		}
+	}
+	if(free_slot < 0) {
+		printf("harness: too many held keys\n");
+		return;
+	}
+	g_harn_hold[free_slot] = a2code;
+	harn_key_event(a2code, 0);
+}
+
+/* Release one held key, or every held key when a2code < 0. */
+static void
+harn_release_key(int a2code)
+{
+	int	i;
+
+	for(i = 0; i < HARN_HOLD_MAX; i++) {
+		if(g_harn_hold[i] < 0) {
+			continue;
+		}
+		if((a2code < 0) || (g_harn_hold[i] == a2code)) {
+			harn_key_event(g_harn_hold[i], 1);
+			g_harn_hold[i] = -1;
+		}
+	}
+}
+
+/* Hex+ASCII dump of emulated memory, addressed bank/offset like the monitor.
+ * Runs off get_memory_c(), so it works with the CPU running. */
+static void
+harn_dump_mem(word32 addr, int len)
+{
+	char	txt[17];
+	word32	c;
+	int	i;
+
+	for(i = 0; i < len; i++) {
+		if((i & 15) == 0) {
+			printf("%02x/%04x:", (addr + i) >> 16,
+							(addr + i) & 0xffff);
+		}
+		c = get_memory_c(addr + i) & 0xff;
+		printf(" %02x", c);
+		txt[i & 15] = ((c >= 0x20) && (c < 0x7f)) ? (char)c : '.';
+		if((i & 15) == 15) {
+			txt[16] = 0;
+			printf("  %s\n", txt);
+		}
+	}
+	if(len & 15) {
+		for(i = len & 15; i < 16; i++) {
+			printf("   ");
+		}
+		txt[len & 15] = 0;
+		printf("  %s\n", txt);
+	}
+	fflush(stdout);
+}
+
+/* Raw binary dump to a file -- for byte-comparing a region (SHR framebuffer,
+ * ship slots, workspace) against a reference or an earlier run. */
+static void
+harn_save_mem(word32 addr, int len, const char *path)
+{
+	FILE	*ofile;
+	int	i;
+
+	ofile = fopen(path, "wb");
+	if(!ofile) {
+		printf("harness: cannot write %s: %s\n", path, strerror(errno));
+		return;
+	}
+	for(i = 0; i < len; i++) {
+		fputc((int)(get_memory_c(addr + i) & 0xff), ofile);
+	}
+	fclose(ofile);
+	printf("harness: wrote %d bytes from %02x/%04x to %s\n", len,
+					addr >> 16, addr & 0xffff, path);
+	fflush(stdout);
+}
+
+/* Parse "bank/offset", "offset", or "$bank/$offset" into a 24-bit address. */
+static word32
+harn_parse_addr(const char *str)
+{
+	const char *slash;
+	word32	bank = 0, off;
+
+	while(*str == '$') {
+		str++;
+	}
+	slash = strchr(str, '/');
+	if(slash) {
+		bank = (word32)strtol(str, 0, 16);
+		str = slash + 1;
+		while(*str == '$') {
+			str++;
+		}
+	}
+	off = (word32)strtol(str, 0, 16);
+	return ((bank & 0xff) << 16) | (off & 0xffff);
+}
+
+static void harn_print_help(void);
+
+/* Run one control-channel line. Returns 1 if it was a harness command (so the
+ * caller does not also hand it to the 65816 monitor), 0 otherwise. */
+static int
+harn_do_cmd(const char *line)
+{
+	char	buf[DBG_LINE_MAX];
+	char	*tok[8];
+	char	*colon, *saveptr;
+	word32	addr;
+	int	ntok, i, a2code, shift, frames, len;
+
+	while((*line == ' ') || (*line == '\t')) {
+		line++;
+	}
+	if((*line == '#') || (*line == ';')) {
+		return 1;		/* comment: consume it */
+	}
+	if(*line == 0) {
+		return 0;		/* blank: the monitor's "next page" */
+	}
+	SDL_strlcpy(buf, line, sizeof(buf));
+
+	/* `echo` keeps its whole argument, spaces and all, so a script can emit
+	 * a sync marker the driving shell greps for. */
+	if(!SDL_strncasecmp(buf, "echo ", 5)) {
+		printf("%s\n", buf + 5);
+		fflush(stdout);
+		return 1;
+	}
+	ntok = 0;
+	saveptr = NULL;
+	for(i = 0; i < 8; i++) {
+		tok[i] = SDL_strtok_r((i == 0) ? buf : NULL, " \t", &saveptr);
+		if(!tok[i]) {
+			break;
+		}
+		ntok++;
+	}
+	if(ntok == 0) {
+		return 1;
+	}
+
+	if(!SDL_strcasecmp(tok[0], "help") && (ntok == 1)) {
+		harn_print_help();
+		return 1;
+	}
+	if(!SDL_strcasecmp(tok[0], "key") || !SDL_strcasecmp(tok[0], "type")) {
+		/* `key a left:20 5` -- each token is one tap, ":n" sets the
+		 * hold in frames. `type` spells out a string, one tap per
+		 * character, so `type CAT` and `key c a t` are the same thing. */
+		if(!SDL_strcasecmp(tok[0], "type")) {
+			for(i = 1; i < ntok; i++) {
+				char *p;
+				if(i > 1) {
+					harn_queue_key(0x31, 0, 0);
+					/* the space the tokenizer ate */
+				}
+				for(p = tok[i]; *p; p++) {
+					char one[2];
+					one[0] = *p;
+					one[1] = 0;
+					a2code = harn_spec_to_a2code(one, &shift);
+					if(a2code < 0) {
+						printf("harness: no key for "
+							"'%c'\n", *p);
+						continue;
+					}
+					harn_queue_key(a2code, shift, 0);
+				}
+			}
+			return 1;
+		}
+		for(i = 1; i < ntok; i++) {
+			frames = 0;
+			colon = strchr(tok[i], ':');
+			if(colon) {
+				*colon = 0;
+				frames = (int)strtol(colon + 1, 0, 10);
+			}
+			a2code = harn_spec_to_a2code(tok[i], &shift);
+			if(a2code < 0) {
+				printf("harness: unknown key '%s'\n", tok[i]);
+				continue;
+			}
+			harn_queue_key(a2code, shift, frames);
+		}
+		return 1;
+	}
+	if(!SDL_strcasecmp(tok[0], "hold")) {
+		for(i = 1; i < ntok; i++) {
+			a2code = harn_spec_to_a2code(tok[i], &shift);
+			if(a2code < 0) {
+				printf("harness: unknown key '%s'\n", tok[i]);
+				continue;
+			}
+			harn_hold_key(a2code);
+		}
+		return 1;
+	}
+	if(!SDL_strcasecmp(tok[0], "release")) {
+		if((ntok < 2) || !SDL_strcasecmp(tok[1], "all")) {
+			harn_release_key(-1);
+			return 1;
+		}
+		for(i = 1; i < ntok; i++) {
+			a2code = harn_spec_to_a2code(tok[i], &shift);
+			if(a2code >= 0) {
+				harn_release_key(a2code);
+			}
+		}
+		return 1;
+	}
+	if(!SDL_strcasecmp(tok[0], "joy")) {
+		/* `joy off` hands the paddles back to a real controller;
+		 * `joy <x> <y>` takes percentages, -100..100, 0 = centered. */
+		if((ntok >= 2) && !SDL_strcasecmp(tok[1], "off")) {
+			g_harn_joy_on = 0;
+			printf("harness: joystick released\n");
+			fflush(stdout);
+			return 1;
+		}
+		if(ntok < 3) {
+			printf("harness: usage: joy <x%%> <y%%> | joy off\n");
+			return 1;
+		}
+		g_harn_joy_x = (int)strtol(tok[1], 0, 10) * 327;
+		g_harn_joy_y = (int)strtol(tok[2], 0, 10) * 327;
+		if(!g_harn_joy_on) {
+			g_harn_joy_on = 1;
+			/* Route the paddles to the "native joystick" backend,
+			 * which is where our joystick_update() is wired in. */
+			g_joystick_native_type1 = 1;
+			g_joystick_type = 2;
+		}
+		return 1;
+	}
+	if(!SDL_strcasecmp(tok[0], "joybtn")) {
+		if(ntok < 3) {
+			printf("harness: usage: joybtn <0|1> <0|1>\n");
+			return 1;
+		}
+		i = (int)strtol(tok[1], 0, 10) & 1;
+		if(strtol(tok[2], 0, 10)) {
+			g_harn_joy_btn |= (1 << i);
+		} else {
+			g_harn_joy_btn &= ~(1 << i);
+		}
+		return 1;
+	}
+	if(!SDL_strcasecmp(tok[0], "mem")) {
+		if(ntok < 2) {
+			printf("harness: usage: mem <bank>/<addr> [len]\n");
+			return 1;
+		}
+		addr = harn_parse_addr(tok[1]);
+		len = (ntok >= 3) ? (int)strtol(tok[2], 0, 16) : 64;
+		harn_dump_mem(addr, len);
+		return 1;
+	}
+	if(!SDL_strcasecmp(tok[0], "save")) {
+		if(ntok < 4) {
+			printf("harness: usage: save <bank>/<addr> <len> "
+								"<file>\n");
+			return 1;
+		}
+		addr = harn_parse_addr(tok[1]);
+		len = (int)strtol(tok[2], 0, 16);
+		harn_save_mem(addr, len, tok[3]);
+		return 1;
+	}
+	if(!SDL_strcasecmp(tok[0], "text")) {
+		/* The 40/80-column text screen as text -- the fastest way to
+		 * read a text-mode screen (the oracle's docked views) without
+		 * OCRing a screenshot. */
+		printf("---8<--- text screen ---8<---\n%s"
+					"--->8--- text screen --->8---\n",
+					cfg_text_screen_str());
+		fflush(stdout);
+		return 1;
+	}
+	if(!SDL_strcasecmp(tok[0], "shot")) {
+		sdl_save_screenshot(&g_mainwin_info,
+			(ntok >= 2) ? tok[1] :
+			((g_cfg_ssfile && g_cfg_ssfile[0]) ? g_cfg_ssfile : NULL));
+		return 1;
+	}
+	if(!SDL_strcasecmp(tok[0], "wait")) {
+		g_harn_wait = (ntok >= 2) ? (int)strtol(tok[1], 0, 10) : 60;
+		return 1;
+	}
+	if(!SDL_strcasecmp(tok[0], "halt")) {
+		set_halt(1);
+		return 1;
+	}
+	if(!SDL_strcasecmp(tok[0], "reset")) {
+		do_reset();
+		return 1;
+	}
+	if(!SDL_strcasecmp(tok[0], "quit")) {
+		g_quit_requested = 1;
+		return 1;
+	}
+	return 0;			/* not ours: let the monitor try it */
+}
+
+static void
+harn_print_help(void)
+{
+	printf(
+"Harness commands (also accepted in a -script file):\n"
+"  key <spec>[:frames] ...  tap keys; spec is a char, a name (left, right,\n"
+"                           up, down, ret, esc, space, tab, del), or $hh\n"
+"  type <text> ...          tap out each character of <text>\n"
+"  hold <spec> ...          press and keep held (sets any-key-down)\n"
+"  release [<spec>...|all]  release held keys\n"
+"  joy <x%%> <y%%> | joy off  virtual joystick, -100..100, 0 = centered\n"
+"  joybtn <0|1> <0|1>       virtual joystick button up/down\n"
+"  mem <bank>/<addr> [len]  hex dump (len hex, default 40); works while running\n"
+"  save <bank>/<addr> <len> <file>   raw binary dump of a memory region\n"
+"  text                     dump the 40/80-column text screen\n"
+"  shot [path]              screenshot now (default: the ssfile path)\n"
+"  wait <frames>            hold off later commands (60 frames = ~1 second)\n"
+"  echo <text>              print <text> (sync marker for the driving shell)\n"
+"  halt / reset / quit      enter the monitor / reset the IIgs / exit\n"
+"Anything else goes to the 65816 monitor ('h' there for its own help).\n");
+	fflush(stdout);
+}
+
+/* Load a script file: one command per line, blank lines and #/; comments
+ * ignored. Lines run one per frame, pausing while `wait` counts down or while
+ * queued keys are still playing out. */
+static void
+harn_script_load(const char *path)
+{
+	char	line[DBG_LINE_MAX];
+	FILE	*ifile;
+	int	cap = 64;
+
+	ifile = fopen(path, "r");
+	if(!ifile) {
+		printf("harness: cannot read script %s: %s\n", path,
+							strerror(errno));
+		return;
+	}
+	g_harn_lines = malloc(cap * sizeof(char *));
+	while(g_harn_lines && fgets(line, sizeof(line), ifile)) {
+		int	len = (int)strlen(line);
+
+		/* fgets keeps the newline; a filename argument would otherwise
+		 * carry it into the file it creates. */
+		while((len > 0) && ((line[len-1] == '\n') ||
+						(line[len-1] == '\r'))) {
+			line[--len] = 0;
+		}
+		if(g_harn_nlines >= cap) {
+			char **newp = realloc(g_harn_lines,
+						cap * 2 * sizeof(char *));
+			if(!newp) {
+				break;
+			}
+			g_harn_lines = newp;
+			cap *= 2;
+		}
+		g_harn_lines[g_harn_nlines++] = kegs_malloc_str(line);
+	}
+	fclose(ifile);
+	printf("harness: loaded %d script lines from %s\n", g_harn_nlines, path);
+	fflush(stdout);
+}
+
+/* Run one line from the loaded script, if any is left. */
+static int
+harn_script_tick(void)
+{
+	const char *line;
+
+	if(g_harn_pc >= g_harn_nlines) {
+		return 0;
+	}
+	line = g_harn_lines[g_harn_pc++];
+	while((*line == ' ') || (*line == '\t')) {
+		line++;
+	}
+	if(*line == 0) {
+		return 1;	/* a blank line in a script is just spacing */
+	}
+	if(!harn_do_cmd(line)) {
+		do_debug_cmd(line);
+	}
+	return 1;
+}
+
 /* Create the stdin reader thread. Non-fatal on failure: the emulator still
  * runs, just without terminal debugger input. */
 static void
@@ -1455,32 +2068,53 @@ sdl_debugger_init(void)
 	SDL_DetachThread(thread);	/* fire-and-forget; dies with the process */
 }
 
-/* Drive the terminal monitor: prompt once on halt, then feed queued lines to
- * the core's command parser. Called once per frame from the main loop. */
+/* Drive the control channel and the terminal monitor. Called once per frame
+ * from the main loop, running or halted: scripted input has to advance while
+ * the game runs, and `mem`/`text`/`shot` are most useful mid-frame. Lines the
+ * harness doesn't claim go to the monitor's command parser, which prompts (and
+ * echoes) only while the CPU is halted.
+ *
+ * At most one command runs per frame, and none while a `wait` is counting down
+ * or queued keys are still playing out. That is what makes a driving script's
+ * `echo` marker a real synchronization point: by the time the marker comes back
+ * on stdout, every command before it has finished on the emulated machine. */
 static void
 sdl_debugger_poll(void)
 {
 	char	line[DBG_LINE_MAX];
 
-	if(!g_dbg_mutex || !g_halt_sim) {
-		g_dbg_prompt_shown = 0;		/* running: re-prompt on next halt */
+	if(!g_dbg_mutex) {
 		return;
 	}
-	if(!g_dbg_prompt_shown) {
+	if(!g_halt_sim) {
+		harn_input_tick();	/* only a running CPU can see keys */
+	}
+	if(g_halt_sim && !g_dbg_prompt_shown) {
 		printf("\n[debugger] CPU halted -- type 'h' for help, 'g' to "
 							"continue\n");
 		sdl_dbg_prompt();
 	}
+	if(g_harn_wait > 0) {
+		g_harn_wait--;
+		return;
+	}
+	if(harn_input_busy()) {
+		return;			/* let queued keys finish first */
+	}
 	/* The terminal echoes what the user types; do_debug_cmd() echoes the
-	 * command and prints its output. Stop if a command (g/s) resumes the CPU. */
-	while(g_halt_sim && sdl_dbg_dequeue(line)) {
-		do_debug_cmd(line);
+	 * command and prints its output. */
+	if(sdl_dbg_dequeue(line)) {
+		if(!harn_do_cmd(line)) {
+			do_debug_cmd(line);
+		}
 		if(g_halt_sim) {
 			sdl_dbg_prompt();
 		} else {
 			g_dbg_prompt_shown = 0;
 		}
+		return;			/* stdin outranks the script file */
 	}
+	harn_script_tick();
 }
 
 int
@@ -1505,6 +2139,10 @@ main(int argc, char **argv)
 
 	sdl_video_init();
 	sdl_debugger_init();
+	harn_hold_init();
+	if(g_cfg_script && g_cfg_script[0]) {
+		harn_script_load(g_cfg_script);
+	}
 
 	/* Main loop: run_16ms() runs one video frame's worth of CPU + video. */
 	while(!g_quit_requested) {

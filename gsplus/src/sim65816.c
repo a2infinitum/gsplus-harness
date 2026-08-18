@@ -70,6 +70,7 @@ extern int g_config_control_panel;
 
 extern int g_audio_enable;
 extern int g_preferred_rate;
+extern char *g_cfg_script;	/* config.c: harness script, set by -script */
 
 int	g_a2_fatal_err = 0;
 dword64	g_dcycles_end = 0;
@@ -519,6 +520,8 @@ print_usage(const char *argv0)
 	printf("  -dhr140          Use simple double-hires color map\n");
 	printf("  -bw              Force black-and-white hires modes\n");
 	printf("  -logpc           Force PC logging on at startup\n");
+	printf("  -script <file>   Run harness commands from <file> "
+						"(one per line)\n");
 	printf("  -cfg <file>      Use <file> as the config file "
 						"(created if absent)\n");
 	harness_usage();
@@ -680,6 +683,14 @@ parse_argv(int argc, char **argv, int slashes_to_find)
 		} else if(!strcmp("-logpc", argv[i])) {
 			printf("Force logpc enable\n");
 			debug_logpc_on("on");
+		} else if(!strcmp("-script", argv[i])) {
+			if((i + 1) >= argc) {
+				printf("Missing argument\n");
+				return 1;
+			}
+			g_cfg_script = strdup(argv[i+1]);
+			printf("Harness script: %s\n", g_cfg_script);
+			i++;
 		} else if(!strncmp("-cfg", argv[i], 4)) {
 			if((i + 1) < argc) {
 				config_set_config_kegs_name(argv[i+1]);

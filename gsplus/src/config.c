@@ -179,6 +179,12 @@ int	g_hblur = 0;		/* horizontal linear blur, 0-100 (0=off, sharp) */
 int	g_vblur = 0;		/* vertical linear blur, 0-100 (0=off, sharp) */
 int	g_hide_mouse = 1;	/* hide host cursor over the window / in fullscreen */
 char	*g_cfg_ssdir = "";	/* screenshot output dir ("" = current dir) */
+int	g_sshot_every = 0;	/* auto-screenshot interval, seconds (0=off) */
+char	*g_cfg_ssfile = "";	/* auto-screenshot fixed path (overwritten) */
+/* Harness command script, set by "-script <file>".  Deliberately NOT a config
+ * variable: GSplus writes every config override back into config.kegs on exit,
+ * and a stale script line would silently replay a test on the next launch. */
+char	*g_cfg_script = "";
 char	*g_cfg_menu_fg = "FFFFFF"; /* config menu text color, RRGGBB hex */
 char	*g_cfg_menu_bg = "1E2A56"; /* config menu background, RRGGBB hex */
 
@@ -409,6 +415,10 @@ Cfg_menu g_cfg_sdl_video_menu[] = {
 { "Vertical Blur 0-100", &g_vblur, "vblur", 0, CFGTYPE_INT },
 { "Hide Mouse Cursor,0,No,1,Yes", &g_hide_mouse, "hidemouse", 0, CFGTYPE_INT },
 { "Screenshot Directory", &g_cfg_ssdir, "ssdir", 0, CFGTYPE_STR },
+{ "Auto-Screenshot Interval secs,0,Off,1,1s,2,2s,5,5s", &g_sshot_every,
+					"ssevery", 0, CFGTYPE_INT },
+{ "Auto-Screenshot File (overwritten)", &g_cfg_ssfile, "ssfile", 0,
+					CFGTYPE_STR },
 { "", 0, 0, 0, 0 },
 { "Menu Text Color (RRGGBB hex)", &g_cfg_menu_fg, "menutextcolor", 0, CFGTYPE_STR },
 { "Menu Background (RRGGBB hex)", &g_cfg_menu_bg, "menubgcolor", 0, CFGTYPE_STR },
