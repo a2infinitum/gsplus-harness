@@ -1950,6 +1950,16 @@ harn_do_cmd(const char *line)
 		set_halt(1);
 		return 1;
 	}
+	if(!SDL_strcasecmp(tok[0], "speed") && (ntok >= 2)) {
+		/* 0 = unlimited, 1 = 1.024MHz, 2 = 2.8MHz, 3 = 8.0MHz.
+		 * Boot with -g_limit_speed 0 for a fast boot, then drop to
+		 * stock speed for flight tests that need human-scale time. */
+		extern int g_limit_speed;
+		g_limit_speed = (int)strtol(tok[1], 0, 10) & 3;
+		printf("harness: g_limit_speed = %d\n", g_limit_speed);
+		fflush(stdout);
+		return 1;
+	}
 	if(!SDL_strcasecmp(tok[0], "reset")) {
 		do_reset();
 		return 1;
@@ -1978,6 +1988,7 @@ harn_print_help(void)
 "  text                     dump the 40/80-column text screen\n"
 "  shot [path]              screenshot now (default: the ssfile path)\n"
 "  wait <frames>            hold off later commands (60 frames = ~1 second)\n"
+"  speed <0-3>              0 unlimited, 1 1MHz, 2 2.8MHz, 3 8MHz (live)\n"
 "  echo <text>              print <text> (sync marker for the driving shell)\n"
 "  halt / reset / quit      enter the monitor / reset the IIgs / exit\n"
 "Anything else goes to the 65816 monitor ('h' there for its own help).\n");
