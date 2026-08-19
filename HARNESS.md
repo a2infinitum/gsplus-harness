@@ -41,6 +41,7 @@ they work with no display attached.
 | `-hstall <secs>` | Exit 3 if the screen has not changed for N seconds |
 | `-hturbo` | No frame pacing; run flat out (90 emulated secs in a few wall secs) |
 | `-script <file>` | Run control-channel commands from a file, one per line |
+| `-timeout <secs>` | Quit with 0 after N **wall-clock** seconds — the backstop for a run that never advances emulated time (`-hsecs` is the deterministic form) |
 
 ### Exit codes
 

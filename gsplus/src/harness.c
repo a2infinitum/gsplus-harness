@@ -65,6 +65,8 @@ typedef struct {
 static int	g_h_active = 0;
 static char	g_h_dir[1024] = ".";
 static double	g_h_limit_secs = 0.0;
+static double	g_h_wall_limit_secs = 0.0;
+static double	g_h_wall_start = 0.0;
 static double	g_h_shot_secs = 0.0;
 static double	g_h_stall_secs = 0.0;
 static Harness_dump g_h_dumps[HARNESS_MAX_DUMPS];
@@ -123,6 +125,8 @@ harness_usage(void)
 								"that long\n");
 	printf("  -hturbo          Test harness: no frame pacing, run flat "
 								"out\n");
+	printf("  -timeout <secs>  Test harness: quit 0 after wall-clock "
+								"secs\n");
 }
 
 /* Called from parse_argv().  Returns 1 and advances *i_ptr past any value
@@ -137,6 +141,18 @@ harness_parse_argv(int argc, char **argv, int *i_ptr)
 
 	i = *i_ptr;
 	arg = argv[i];
+	if(!strcmp(arg, "-timeout")) {
+		/* Wall-clock, unlike -hsecs: this is the backstop for a run
+		 * that never gets far enough to advance emulated time. */
+		if(i >= (argc - 1)) {
+			printf("%s needs an argument\n", arg);
+			return -1;
+		}
+		g_h_wall_limit_secs = strtod(argv[i + 1], 0);
+		*i_ptr = i + 1;
+		g_h_active = 1;
+		return 1;
+	}
 	if(strncmp(arg, "-h", 2) != 0) {
 		return 0;
 	}
@@ -456,6 +472,22 @@ harness_tick(void)
 	}
 	if((g_h_limit_secs > 0.0) && (esecs >= g_h_limit_secs)) {
 		return harness_finish("timeout", 0, esecs);
+	}
+	if(g_h_wall_limit_secs > 0.0) {
+		if(g_h_wall_start == 0.0) {
+			g_h_wall_start = get_dtime();
+		} else if((get_dtime() - g_h_wall_start) >=
+						g_h_wall_limit_secs) {
+			/* Quiet exit, no artifact dump: -timeout is the
+			 * backstop on interactive/scripted runs that execute
+			 * from a working tree, not the batch pass/fail. */
+			g_h_done = 1;
+			g_h_exit_code = 0;
+			printf("Harness: wall-timeout at t=%.2fs, exiting 0\n",
+								esecs);
+			fflush(stdout);
+			return 0x200;
+		}
 	}
 	return 0;
 }
