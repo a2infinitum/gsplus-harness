@@ -803,6 +803,15 @@ do_c700(word32 ret)
 		if((slot == 5) || (g_rom_version == 0)) {
 			engine.kpc = 0xc600;	// Try to boot slot 6
 		}
+		if((engine.kpc == 0xc500) &&
+				(iwm_get_dsk_from_slot_drive(5, 0)->fd < 0) &&
+				(iwm_get_dsk_from_slot_drive(6, 0)->fd >= 0)) {
+			// s5d1 is empty but s6d1 has a disk: the ROM's own
+			// scan would sit at the empty slot 5 forever, so go
+			// straight to the 5.25" boot ROM
+			printf("s5d1 empty, trying slot 6!\n");
+			engine.kpc = 0xc600;
+		}
 	}
 }
 
