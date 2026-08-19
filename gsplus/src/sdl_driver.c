@@ -1984,6 +1984,9 @@ harn_do_cmd(const char *line)
 		/* Report every write to a region, with the PC that did it,
 		 * and keep running.  For hunting the one writer that should
 		 * not be there among hundreds that should. */
+		static word32 harn_watch_start = 0, harn_watch_end = 0;
+		static int harn_watch_set = 0;
+
 		if(ntok < 2) {
 			printf("harness: usage: watch <bank>/<addr> [len] "
 					"[trace]   (watch off = clear)\n");
@@ -1993,6 +1996,14 @@ harn_do_cmd(const char *line)
 			g_watch_noisy = 0;
 			g_watch_trace = 0;
 			g_watch_halt_trace = 0;
+			if(harn_watch_set) {
+				/* Also remove the write breakpoint itself:
+				 * with the flags cleared a hit would fall
+				 * into the default behavior, which HALTS,
+				 * wedging every later `wait`/`do` */
+				delete_bp(harn_watch_start, harn_watch_end);
+				harn_watch_set = 0;
+			}
 			printf("harness: watch off\n");
 			fflush(stdout);
 			return 1;
@@ -2002,6 +2013,12 @@ harn_do_cmd(const char *line)
 		if(len < 1) {
 			len = 1;
 		}
+		if(harn_watch_set) {
+			delete_bp(harn_watch_start, harn_watch_end);
+		}
+		harn_watch_start = addr;
+		harn_watch_end = addr + len - 1;
+		harn_watch_set = 1;
 		if((ntok >= 4) && !SDL_strcasecmp(tok[3], "stop")) {
 			/* Halt on the write instead of reporting it.  Only
 			 * with the sim stopped are the engine registers
