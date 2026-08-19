@@ -30,7 +30,22 @@ case 0x00:			/*  brk */
 		PUSH16(kpc);
 		PUSH8(psr & 0xff);
 		tmp1 = 0xffffe6;
-		halt_printf("Halting for native break!\n");
+		halt_printf("Halting for native break at %02x/%04x!\n",
+			(kpc >> 16) & 0xff, kpc & 0xffff);
+		{	/* local patch: dump stack (caller chain) at BRK */
+			int i_;
+			word32 sv_;
+			printf("S=%04x A=%04x X=%04x Y=%04x D=%04x stack:",
+				stack, acc, xreg, yreg, direct);
+			for(i_ = 1; i_ <= 24; i_++) {
+				GET_MEMORY8((stack + i_) & 0xffff, sv_);
+				printf(" %02x", sv_);
+			}
+			printf("\n");
+			fflush(stdout);
+		}
+		debug_logpc_tail(24);	/* local patch: what led up to this */
+		exit(3);		/* and quit so the dump survives */
 	}
 	tmp1 = moremem_fix_vector_pull(tmp1);
 	GET_MEMORY16(tmp1, kpc, 0);

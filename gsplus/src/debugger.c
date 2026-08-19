@@ -55,6 +55,10 @@ extern word32 g_sound_file_bytes;
 
 int	g_num_breakpoints = 0;
 Break_point g_break_pts[MAX_BREAK_POINTS];
+int	g_watch_halt_trace = 0;	/* dump this many instrs before halting */
+word32	g_watch_last_val = 0;	/* value of the store that tripped it */
+int	g_watch_noisy = 0;	/* local patch: report writes, don't halt */
+int	g_watch_trace = 0;	/* instructions of trace per watch hit */
 
 extern int g_irq_pending;
 
@@ -78,7 +82,10 @@ word32	g_a4bank = 0;
 
 #define	MAX_CMD_BUFFER		229
 
-#define PC_LOG_LEN		(2*1024*1024)
+/* local patch: 2M entries made debug_logpc_save unusable (it writes
+ * every entry).  8K is far more than any crash investigation needs and
+ * makes the interleaved PC+data dump small enough to actually read. */
+#define PC_LOG_LEN		(8*1024)
 
 Pc_log g_pc_log_array[PC_LOG_LEN + 2];
 Data_log g_data_log_array[PC_LOG_LEN + 2];
@@ -186,6 +193,46 @@ debug_hit_bp(word32 addr, dword64 dfcyc, word32 maybe_stack, word32 type,
 			get_memory_c(list_ptr + 3), get_memory_c(list_ptr + 4),
 			get_memory_c(list_ptr + 5), get_memory_c(list_ptr + 6));
 		return;
+	}
+
+	/* local patch: harness "watch" points report the writer and keep
+	 * running.  Halting on the first write is useless when a location is
+	 * written legitimately hundreds of times and you are hunting the one
+	 * writer that should not be there.
+	 */
+	if(g_watch_noisy && (type & 2)) {
+		/* engine.kpc is stale here - the engine keeps kpc in a local
+		 * and only writes it back on exit - so name the writer from
+		 * the PC ring instead.  g_log_pc_ptr is the in-flight
+		 * instruction: its PC and opcode are already filled in.
+		 */
+		if(g_log_pc_enable) {
+			word32 wkpc = g_log_pc_ptr->dbank_kpc & 0xffffff;
+			printf("WATCH: write %02x to %06x by %02x/%04x (op %02x)\n",
+				g_watch_last_val & 0xff, addr,
+				(wkpc >> 16) & 0xff, wkpc & 0xffff,
+				(g_log_pc_ptr->instr >> 24) & 0xff);
+		} else {
+			printf("WATCH: write to %06x (start with -logpc to "
+				"see the writer)\n", addr);
+		}
+		fflush(stdout);
+		if(g_watch_trace) {
+			debug_logpc_tail(g_watch_trace);
+		}
+		return;
+	}
+	if((type & 2) && g_watch_halt_trace) {
+		/* halting mode: the halt itself is deferred by a few
+		 * instructions, so dump the ring here where the last entry
+		 * really is the store. */
+		printf("WATCH: write %02x to %06x, trace follows\n",
+						g_watch_last_val & 0xff, addr);
+		fflush(stdout);
+		debug_logpc_tail(g_watch_halt_trace);
+		debug_logpc_save("");	/* interleaved PC+data -> logpc_out */
+		printf("WATCH: wrote logpc_out (PC + data accesses)\n");
+		fflush(stdout);
 	}
 
 	dbg_log_info(dfcyc, addr, pos, 0x6270);
@@ -1199,6 +1246,67 @@ debug_show_data_info(FILE *pcfile, Data_log *log_data_ptr, dword64 base_dcyc,
 		}
 	}
 	return log_data_ptr;
+}
+
+/* local patch: compact tail of the PC ring straight to stdout.
+ * debug_logpc_save writes all PC_LOG_LEN (2M) entries to a file, which is
+ * useless when you just want to see what led into a crash - and the harness
+ * captures stdout anyway.  Prints oldest-to-newest so the last line is the
+ * instruction that faulted.  Needs -logpc (g_log_pc_enable) to have been on.
+ */
+void
+debug_logpc_tail(int count)
+{
+	Pc_log	*ptr;
+	char	*str;
+	word32	instr, psr, acc, xreg, yreg, stack, direct, dbank, kpc;
+	int	accsize, xsize, i;
+
+	if(!g_log_pc_enable) {
+		printf("logpc-tail: PC logging is off (start with -logpc)\n");
+		fflush(stdout);
+		return;
+	}
+	if(count <= 0 || count > PC_LOG_LEN) {
+		count = 24;
+	}
+
+	printf("---- last %d instructions (oldest first, last = in flight) "
+							"----\n", count);
+	/* g_log_pc_ptr holds the instruction currently executing (its PC and
+	 * opcode are written at fetch, the registers at retire), so include
+	 * it: when a watchpoint fires mid-instruction, that IS the writer.
+	 */
+	ptr = g_log_pc_ptr - (count - 1);
+	if(ptr < g_log_pc_start_ptr) {
+		ptr += PC_LOG_LEN;
+	}
+	for(i = 0; i < count; i++) {
+		dbank = (ptr->dbank_kpc >> 24) & 0xff;
+		kpc = ptr->dbank_kpc & 0xffffff;
+		instr = ptr->instr;
+		psr = (ptr->psr_acc >> 16) & 0xffff;
+		acc = ptr->psr_acc & 0xffff;
+		xreg = (ptr->xreg_yreg >> 16) & 0xffff;
+		yreg = ptr->xreg_yreg & 0xffff;
+		stack = (ptr->stack_direct >> 16) & 0xffff;
+		direct = ptr->stack_direct & 0xffff;
+
+		accsize = (psr & 0x20) ? 1 : 2;
+		xsize = (psr & 0x10) ? 1 : 2;
+		str = do_dis(kpc, accsize, xsize, 1, instr, 0);
+		printf("  %02x/%04x A:%04x X:%04x Y:%04x S:%04x D:%04x "
+			"DB:%02x P:%03x %s\n", (kpc >> 16) & 0xff,
+			kpc & 0xffff, acc, xreg, yreg, stack, direct, dbank,
+			psr, str);
+
+		ptr++;
+		if(ptr >= g_log_pc_end_ptr) {
+			ptr = g_log_pc_start_ptr;
+		}
+	}
+	printf("---- end of trace ----\n");
+	fflush(stdout);
 }
 
 void

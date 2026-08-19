@@ -81,6 +81,9 @@ static Window_info g_mainwin_info;
  * (e.g. "-fullscreen 1") or config.kegs. */
 extern int g_fullscreen, g_borderless, g_noaspect, g_highdpi;
 extern int g_nohwaccel;
+extern int g_watch_noisy;	/* harness "watch": report writes, don't halt */
+extern int g_watch_trace;	/* instructions of trace to dump per watch hit */
+extern int g_watch_halt_trace;	/* trace dumped just before a halting watch */
 extern int g_scanline_simulator;	/* CRT scanline overlay intensity, 0-100 */
 extern int g_crt;			/* curved CRT effect on/off */
 extern int g_crt_curve;			/* CRT screen curvature, 0-100 */
@@ -1924,6 +1927,55 @@ harn_do_cmd(const char *line)
 		addr = harn_parse_addr(tok[1]);
 		len = (int)strtol(tok[2], 0, 16);
 		harn_save_mem(addr, len, tok[3]);
+		return 1;
+	}
+	if(!SDL_strcasecmp(tok[0], "watch")) {
+		/* Report every write to a region, with the PC that did it,
+		 * and keep running.  For hunting the one writer that should
+		 * not be there among hundreds that should. */
+		if(ntok < 2) {
+			printf("harness: usage: watch <bank>/<addr> [len] "
+					"[trace]   (watch off = clear)\n");
+			return 1;
+		}
+		if(!SDL_strcasecmp(tok[1], "off")) {
+			g_watch_noisy = 0;
+			g_watch_trace = 0;
+			g_watch_halt_trace = 0;
+			printf("harness: watch off\n");
+			fflush(stdout);
+			return 1;
+		}
+		addr = harn_parse_addr(tok[1]);
+		len = (ntok >= 3) ? (int)strtol(tok[2], 0, 16) : 1;
+		if(len < 1) {
+			len = 1;
+		}
+		if((ntok >= 4) && !SDL_strcasecmp(tok[3], "stop")) {
+			/* Halt on the write instead of reporting it.  Only
+			 * with the sim stopped are the engine registers
+			 * written back, so this is the one way to see the
+			 * real PC of the writer. */
+			g_watch_noisy = 0;
+			g_watch_trace = 0;
+			g_watch_halt_trace = 20;
+		} else {
+			g_watch_noisy = 1;
+			g_watch_halt_trace = 0;
+			g_watch_trace = (ntok >= 4) ?
+					(int)strtol(tok[3], 0, 10) : 0;
+		}
+		set_bp(addr, addr + len - 1, 2);	/* 2 = write */
+		printf("harness: watching writes to %06x-%06x (%s)\n",
+			addr, addr + len - 1,
+			g_watch_noisy ? "report" : "halt");
+		fflush(stdout);
+		return 1;
+	}
+	if(!SDL_strcasecmp(tok[0], "trace")) {
+		/* Dump the last N instructions from the PC ring right now.
+		 * Needs -logpc; the BRK handler dumps 24 automatically. */
+		debug_logpc_tail((ntok >= 2) ? (int)strtol(tok[1], 0, 10) : 24);
 		return 1;
 	}
 	if(!SDL_strcasecmp(tok[0], "text")) {

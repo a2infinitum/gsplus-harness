@@ -274,6 +274,7 @@ void debug_logpc_off(const char *str);
 void debug_logpc_out_data(FILE *pcfile, Data_log *log_data_ptr, dword64 start_dcyc);
 Data_log *debug_show_data_info(FILE *pcfile, Data_log *log_data_ptr, dword64 base_dcyc, dword64 dfcyc, dword64 start_dcyc, int *data_wrap_ptr, int *count_ptr);
 void debug_logpc_save(const char *cmd_str);
+void debug_logpc_tail(int count);
 void set_bp(word32 addr, word32 end_addr, word32 acc_type);
 void show_bp(void);
 void delete_bp(word32 addr, word32 end_addr);

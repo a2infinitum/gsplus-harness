@@ -40,6 +40,7 @@ extern Kimage g_debugwin_kimage;
 
 extern word32 g_log_pc_enable;
 extern Pc_log *g_log_pc_ptr;
+extern word32 g_watch_last_val;	/* local patch: harness watchpoints */
 extern Pc_log *g_log_pc_start_ptr;
 extern Pc_log *g_log_pc_end_ptr;
 
@@ -413,6 +414,7 @@ set_memory8_io_stub(word32 addr, word32 val, byte *stat, dword64 *dcycs_ptr,
 	wstat = PTR2WORD(stat) & 0xff;
 	dfcyc = *dcycs_ptr;
 	if(wstat & (1 << (31 - BANK_BREAK_BIT))) {
+		g_watch_last_val = val;	/* local patch: what is being stored */
 		check_breakpoints(addr, dfcyc, 0, 2);
 	}
 	ptr = stat - wstat + ((addr) & 0xff);
