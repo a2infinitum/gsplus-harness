@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include "defc.h"
+#include <execinfo.h>	/* local patch: backtrace at watchpoints */
 
 #include "disas.h"
 
@@ -57,6 +58,7 @@ int	g_num_breakpoints = 0;
 Break_point g_break_pts[MAX_BREAK_POINTS];
 int	g_watch_halt_trace = 0;	/* dump this many instrs before halting */
 word32	g_watch_last_val = 0;	/* value of the store that tripped it */
+word32	g_cur_kpc = 0;		/* live PC, updated every instruction fetch */
 int	g_watch_noisy = 0;	/* local patch: report writes, don't halt */
 int	g_watch_trace = 0;	/* instructions of trace per watch hit */
 
@@ -206,15 +208,17 @@ debug_hit_bp(word32 addr, dword64 dfcyc, word32 maybe_stack, word32 type,
 		 * the PC ring instead.  g_log_pc_ptr is the in-flight
 		 * instruction: its PC and opcode are already filled in.
 		 */
-		if(g_log_pc_enable) {
-			word32 wkpc = g_log_pc_ptr->dbank_kpc & 0xffffff;
-			printf("WATCH: write %02x to %06x by %02x/%04x (op %02x)\n",
-				g_watch_last_val & 0xff, addr,
-				(wkpc >> 16) & 0xff, wkpc & 0xffff,
-				(g_log_pc_ptr->instr >> 24) & 0xff);
-		} else {
-			printf("WATCH: write to %06x (start with -logpc to "
-				"see the writer)\n", addr);
+		printf("WATCH: write %02x to %06x by PC %02x/%04x\n",
+			g_watch_last_val & 0xff, addr,
+			(g_cur_kpc >> 16) & 0xff, g_cur_kpc & 0xffff);
+		{	/* which EMULATOR code path is doing the store?  The
+			 * 65816 PC has been pointing at non-writing opcodes,
+			 * which means the write is not a CPU store at all. */
+			void *bt[24];
+			int n = backtrace(bt, 24);
+			printf("WATCH: host backtrace:\n");
+			fflush(stdout);
+			backtrace_symbols_fd(bt, n, 1);
 		}
 		fflush(stdout);
 		if(g_watch_trace) {
@@ -226,8 +230,9 @@ debug_hit_bp(word32 addr, dword64 dfcyc, word32 maybe_stack, word32 type,
 		/* halting mode: the halt itself is deferred by a few
 		 * instructions, so dump the ring here where the last entry
 		 * really is the store. */
-		printf("WATCH: write %02x to %06x, trace follows\n",
-						g_watch_last_val & 0xff, addr);
+		printf("WATCH: write %02x to %06x by PC %02x/%04x, trace follows\n",
+			g_watch_last_val & 0xff, addr,
+			(g_cur_kpc >> 16) & 0xff, g_cur_kpc & 0xffff);
 		fflush(stdout);
 		debug_logpc_tail(g_watch_halt_trace);
 		debug_logpc_save("");	/* interleaved PC+data -> logpc_out */

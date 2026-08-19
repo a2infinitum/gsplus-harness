@@ -1929,6 +1929,57 @@ harn_do_cmd(const char *line)
 		harn_save_mem(addr, len, tok[3]);
 		return 1;
 	}
+	/* Claim the "<bank>/<addr>:<bytes>" poke form ourselves.  Passing it
+	 * through to the 65816 monitor is a trap: that parser takes only
+	 * LOWERCASE hex (uppercase letters are monitor commands), so
+	 * "04/294E:ff" silently truncates to address $0294 and writes there
+	 * instead - which is exactly how a test harness ends up corrupting
+	 * the code it is testing.  strtol here is case-insensitive. */
+	{
+		const char *colon = strchr(tok[0], ':');
+		const char *slash = strchr(tok[0], '/');
+		if(colon && slash && (slash < colon) &&
+				(strspn(tok[0], "$0123456789abcdefABCDEF/") ==
+						(size_t)(colon - tok[0]))) {
+			char abuf[32];
+			word32 paddr;
+			size_t alen = (size_t)(colon - tok[0]);
+			int nb = 0;
+			if(alen >= sizeof(abuf)) {
+				alen = sizeof(abuf) - 1;
+			}
+			memcpy(abuf, tok[0], alen);
+			abuf[alen] = 0;
+			paddr = harn_parse_addr(abuf);
+			/* bytes may follow the colon and/or as later tokens */
+			{
+				const char *p = colon + 1;
+				int t = 1;
+				while(1) {
+					while(*p == ' ') {
+						p++;
+					}
+					if(*p) {
+						long v = strtol(p, (char **)&p,
+									16);
+						set_memory_c(paddr + nb,
+							(word32)v & 0xff, 0);
+						nb++;
+						continue;
+					}
+					if(t >= ntok) {
+						break;
+					}
+					p = tok[t++];
+				}
+			}
+			printf("harness: poked %d byte%s at %02x/%04x\n", nb,
+				(nb == 1) ? "" : "s", (paddr >> 16) & 0xff,
+				paddr & 0xffff);
+			fflush(stdout);
+			return 1;
+		}
+	}
 	if(!SDL_strcasecmp(tok[0], "watch")) {
 		/* Report every write to a region, with the PC that did it,
 		 * and keep running.  For hunting the one writer that should

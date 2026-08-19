@@ -41,6 +41,7 @@ extern Kimage g_debugwin_kimage;
 extern word32 g_log_pc_enable;
 extern Pc_log *g_log_pc_ptr;
 extern word32 g_watch_last_val;	/* local patch: harness watchpoints */
+extern word32 g_cur_kpc;
 extern Pc_log *g_log_pc_start_ptr;
 extern Pc_log *g_log_pc_end_ptr;
 
@@ -843,6 +844,9 @@ get_remaining_operands(word32 addr, word32 opcode, word32 psr,
 
 #define FETCH_OPCODE							\
 	addr = kpc;							\
+	g_cur_kpc = kpc;	/* local patch: live PC for watchpoints,\
+				 * set in ALL engine variants (the PC ring\
+				 * only exists in the *_log ones) */	\
 	CYCLES_PLUS_2;							\
 	stat = GET_PAGE_INFO_RD(((addr) >> 8) & 0xffff);		\
 	wstat = PTR2WORD(stat) & 0xff;					\
