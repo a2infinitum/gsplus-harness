@@ -94,8 +94,11 @@ this list in the emulator:
     <bank>/<addr>:<bytes>     poke memory (hex, case-insensitive)
     save <bank>/<addr> <len> <file>   raw region dump, for byte-comparing
     watch <bank>/<addr> [len] [n|stop]  report every write to the region,
-                              with the value and the writing PC, and keep
-                              running; "n" also dumps n instructions of
+                              with the value, the writing PC and a cycle
+                              stamp (1.023 MHz reference cycles, whatever
+                              the CPU speed - two hits bracketing a routine
+                              give its elapsed time), and keep running;
+                              "n" also dumps n instructions of
                               trace per hit; "stop" halts on the write and
                               dumps an interleaved PC+data trace to
                               logpc_out instead. "watch off" clears both

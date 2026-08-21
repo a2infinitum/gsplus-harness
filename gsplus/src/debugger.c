@@ -208,9 +208,13 @@ debug_hit_bp(word32 addr, dword64 dfcyc, word32 maybe_stack, word32 type,
 		 * the PC ring instead.  g_log_pc_ptr is the in-flight
 		 * instruction: its PC and opcode are already filled in.
 		 */
-		printf("WATCH: write %02x to %06x by PC %02x/%04x\n",
+		/* the cycle stamp (1.023 MHz reference cycles, independent of
+		 * the CPU speed setting) lets two hits bracket a routine:
+		 * delta = elapsed time in microseconds-ish */
+		printf("WATCH: write %02x to %06x by PC %02x/%04x cyc %llu\n",
 			g_watch_last_val & 0xff, addr,
-			(g_cur_kpc >> 16) & 0xff, g_cur_kpc & 0xffff);
+			(g_cur_kpc >> 16) & 0xff, g_cur_kpc & 0xffff,
+			(unsigned long long)(dfcyc >> 16));
 		{	/* which EMULATOR code path is doing the store?  The
 			 * 65816 PC has been pointing at non-writing opcodes,
 			 * which means the write is not a CPU store at all. */
@@ -230,7 +234,7 @@ debug_hit_bp(word32 addr, dword64 dfcyc, word32 maybe_stack, word32 type,
 		/* halting mode: the halt itself is deferred by a few
 		 * instructions, so dump the ring here where the last entry
 		 * really is the store. */
-		printf("WATCH: write %02x to %06x by PC %02x/%04x, trace follows\n",
+		printf("WATCH: write %02x to %06x by PC %02x/%04x cyc %llu, trace follows\n",
 			g_watch_last_val & 0xff, addr,
 			(g_cur_kpc >> 16) & 0xff, g_cur_kpc & 0xffff);
 		fflush(stdout);
